@@ -12,7 +12,9 @@ class TelegramService
     {
         $url = 'https://api.telegram.org/bot' . config('telegram.token') . '/' . $metodo;
 
-        return Http::timeout($timeout)->post($url, $dados);
+        return Http::timeout($timeout)
+            ->when(! config('telegram.verificar_ssl'), fn($http) => $http->withoutVerifying())
+            ->post($url, $dados);
     }
 
     public function enviar(int $chat, string $texto, array $botoes = []): void
