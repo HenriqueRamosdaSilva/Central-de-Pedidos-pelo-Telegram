@@ -30,13 +30,23 @@ class BotPedidos
 
         if (str_starts_with($texto, '/')) {
             Cache::forget("aguardando_endereco:$chat");
+            Cache::forget("cadastro:$chat");
 
             match (true) {
                 str_starts_with($texto, '/start') => $this->boasVindas($mensagem['from'], $chat),
                 str_starts_with($texto, '/cardapio') => $this->mostrarCardapio($chat),
                 str_starts_with($texto, '/carrinho') => $this->mostrarCarrinho($chat),
+                str_starts_with($texto, '/cadastro') => $this->iniciarCadastro($chat),
                 default => $this->telegram->enviar($chat, 'Comando não reconhecido. Use /cardapio ou /carrinho.'),
             };
+
+            return;
+        }
+
+        $cadastro = Cache::get("cadastro:$chat");
+
+        if ($cadastro) {
+            $this->continuarCadastro($chat, $texto, $cadastro);
 
             return;
         }
@@ -83,7 +93,7 @@ class BotPedidos
             $dados === 'limpar' => $this->limparCarrinho($chat),
             $dados === 'finalizar' => $this->perguntarTipo($chat),
             $dados === 'tipo:retirada' => $this->confirmar($clique['from'], $chat, 'retirada', null),
-            $dados === 'tipo:entrega' => $this->pedirEndereco($chat),
+            $dados === 'tipo:entrega' => $this->escolherEntrega($clique['from'], $chat),
             default => null,
         };
     }
@@ -91,7 +101,10 @@ class BotPedidos
     private function boasVindas(array $usuario, int $chat): void
     {
         $nome = $usuario['first_name'] ?? 'tudo bem';
-        $this->telegram->enviar($chat, "Olá, {$nome}! Aqui você faz seu pedido pelo Telegram.");
+        $cadastrado = Cliente::where('telegram_id', $chat)->whereNotNull('endereco')->exists();
+        $dica = $cadastrado ? '' : "\n\nUse /cadastro para salvar seus dados e agilizar as próximas entregas.";
+
+        $this->telegram->enviar($chat, "Olá, {$nome}! Aqui você faz seu pedido pelo Telegram.{$dica}");
         $this->mostrarCardapio($chat);
     }
 
@@ -176,6 +189,59 @@ class BotPedidos
         ]]);
     }
 
+    private function iniciarCadastro(int $chat): void
+    {
+        Cache::put("cadastro:$chat", ['etapa' => 'nome', 'dados' => []], now()->addHour());
+        $this->telegram->enviar($chat, 'Vamos fazer o seu cadastro. Qual é o seu nome completo?');
+    }
+
+    private function continuarCadastro(int $chat, string $texto, array $estado): void
+    {
+        $etapa = $estado['etapa'];
+
+        if ($etapa === 'telefone' && strlen(preg_replace('/\D/', '', $texto)) < 10) {
+            $this->telegram->enviar($chat, 'Telefone inválido. Digite com DDD, por exemplo: (34) 99999-9999');
+
+            return;
+        }
+
+        $estado['dados'][$etapa] = mb_substr($texto, 0, 300);
+
+        $proxima = ['nome' => 'telefone', 'telefone' => 'endereco'][$etapa] ?? null;
+
+        if ($proxima) {
+            $estado['etapa'] = $proxima;
+            Cache::put("cadastro:$chat", $estado, now()->addHour());
+            $this->telegram->enviar($chat, $proxima === 'telefone'
+                ? 'Qual é o seu telefone (com DDD)?'
+                : 'Qual é o seu endereço de entrega (rua, número, bairro)?');
+
+            return;
+        }
+
+        Cache::forget("cadastro:$chat");
+        Cliente::updateOrCreate(['telegram_id' => $chat], $estado['dados']);
+
+        $this->telegram->enviar(
+            $chat,
+            "Cadastro salvo, {$estado['dados']['nome']}! Nas próximas entregas não vou pedir o endereço de novo. Para mudar seus dados, use /cadastro.",
+            [[['text' => 'Ver cardápio', 'callback_data' => 'cardapio']]]
+        );
+    }
+
+    private function escolherEntrega(array $usuario, int $chat): void
+    {
+        $endereco = Cliente::where('telegram_id', $chat)->value('endereco');
+
+        if ($endereco) {
+            $this->confirmar($usuario, $chat, 'entrega', $endereco);
+
+            return;
+        }
+
+        $this->pedirEndereco($chat);
+    }
+
     private function pedirEndereco(int $chat): void
     {
         Cache::put("aguardando_endereco:$chat", true, now()->addHour());
@@ -207,7 +273,7 @@ class BotPedidos
                 }
             }
 
-            $cliente = Cliente::updateOrCreate(
+            $cliente = Cliente::firstOrCreate(
                 ['telegram_id' => $chat],
                 ['nome' => trim(($usuario['first_name'] ?? '') . ' ' . ($usuario['last_name'] ?? '')) ?: 'Cliente do Telegram']
             );
@@ -244,10 +310,18 @@ class BotPedidos
 
         Cache::forget("carrinho:$chat");
 
+        $entrega = $tipo === 'entrega' ? "\nEntrega em: {$endereco}" : '';
+        $cadastrado = Cliente::where('telegram_id', $chat)->whereNotNull('endereco')->exists();
+        $dica = ($tipo === 'entrega' && ! $cadastrado)
+            ? "\n\nDica: use /cadastro para salvar seus dados e não digitar o endereço nas próximas vezes."
+            : '';
+
         $this->telegram->enviar(
             $chat,
             "Pedido #{$pedido->id} recebido! Total: R$ " . number_format($pedido->total, 2, ',', '.')
+            . $entrega
             . "\nAvisaremos por aqui quando houver novidades."
+            . $dica
         );
     }
 }

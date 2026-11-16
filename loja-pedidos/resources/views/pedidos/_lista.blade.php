@@ -6,7 +6,7 @@
         </h3>
 
         <p>
-            {{ $pedido->cliente->nome }} —
+            {{ $pedido->cliente->nome }}{{ $pedido->cliente->telefone ? ' (' . $pedido->cliente->telefone . ')' : '' }} —
             {{ $pedido->tipo === 'entrega' ? 'Entrega: ' . $pedido->endereco : 'Retirada na loja' }}
         </p>
 
