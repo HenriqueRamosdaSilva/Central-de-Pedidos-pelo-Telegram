@@ -61,9 +61,15 @@ class BotPedidos
 
             if ($produto) {
                 $carrinho = Cache::get("carrinho:$chat", []);
-                $carrinho[$produto->id] = ($carrinho[$produto->id] ?? 0) + 1;
-                Cache::put("carrinho:$chat", $carrinho, now()->addDay());
-                $aviso = "{$produto->nome} adicionado ({$carrinho[$produto->id]})";
+                $naCesta = $carrinho[$produto->id] ?? 0;
+
+                if ($naCesta >= $produto->quantidade) {
+                    $aviso = "Só temos {$produto->quantidade} em estoque";
+                } else {
+                    $carrinho[$produto->id] = $naCesta + 1;
+                    Cache::put("carrinho:$chat", $carrinho, now()->addDay());
+                    $aviso = "{$produto->nome} adicionado ({$carrinho[$produto->id]})";
+                }
             } else {
                 $aviso = 'Produto indisponível';
             }
@@ -186,8 +192,21 @@ class BotPedidos
             return;
         }
 
-        // Os preços vêm do banco (nunca do Telegram), então o total é confiável.
-        $pedido = DB::transaction(function () use ($usuario, $chat, $tipo, $endereco, $itens) {
+        $semEstoque = null;
+
+        $pedido = DB::transaction(function () use ($usuario, $chat, $tipo, $endereco, $itens, &$semEstoque) {
+            $estoque = Produto::whereIn('id', $itens->pluck('id'))->lockForUpdate()->get()->keyBy('id');
+
+            foreach ($itens as $p) {
+                $atual = $estoque->get($p->id);
+
+                if (! $atual || ! $atual->ativo || $atual->quantidade < $p->qtd) {
+                    $semEstoque = $p->nome;
+
+                    return null;
+                }
+            }
+
             $cliente = Cliente::updateOrCreate(
                 ['telegram_id' => $chat],
                 ['nome' => trim(($usuario['first_name'] ?? '') . ' ' . ($usuario['last_name'] ?? '')) ?: 'Cliente do Telegram']
@@ -206,10 +225,22 @@ class BotPedidos
                     'preco' => $p->preco,
                     'quantidade' => $p->qtd,
                 ]);
+
+                $estoque->get($p->id)->decrement('quantidade', $p->qtd);
             }
 
             return $pedido;
         });
+
+        if (! $pedido) {
+            $this->telegram->enviar(
+                $chat,
+                "Não temos estoque suficiente de {$semEstoque} no momento. Ajuste o carrinho e tente de novo.",
+                [[['text' => '🛒 Ver carrinho', 'callback_data' => 'carrinho']]]
+            );
+
+            return;
+        }
 
         Cache::forget("carrinho:$chat");
 
