@@ -36,6 +36,15 @@
             · Status: {{ str_replace('_', ' ', $pedido->status) }}
         </p>
 
+        @if ($pedido->nota)
+            <p>
+                Avaliação: {{ str_repeat('★', $pedido->nota) }}{{ str_repeat('☆', 5 - $pedido->nota) }}
+                @if ($pedido->comentario_avaliacao)
+                    — {{ $pedido->comentario_avaliacao }}
+                @endif
+            </p>
+        @endif
+
         @if ($proximo = $pedido->proximoStatus())
             <form action="{{ route('pedidos.status', $pedido) }}" method="POST">
                 @csrf

@@ -5,6 +5,7 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Support\Facades\DB;
 
 class Pedido extends Model
 {
@@ -29,6 +30,7 @@ class Pedido extends Model
     protected $fillable = [
         'cliente_id', 'tipo', 'endereco', 'total', 'status',
         'taxa_entrega', 'forma_pagamento', 'troco_para', 'observacao',
+        'nota', 'comentario_avaliacao',
     ];
 
     protected function casts(): array
@@ -63,6 +65,40 @@ class Pedido extends Model
     public function rotuloPagamento(): string
     {
         return self::PAGAMENTOS[$this->forma_pagamento] ?? 'Não informado';
+    }
+
+    public static function mudarStatus(int $id, string $novoStatus, array $statusAtuaisPermitidos = ['novo', 'em_preparo', 'pronto']): ?self
+    {
+        return DB::transaction(function () use ($id, $novoStatus, $statusAtuaisPermitidos) {
+            $atual = self::with('itens')->lockForUpdate()->find($id);
+
+            if (! $atual || ! in_array($atual->status, $statusAtuaisPermitidos, true)) {
+                return null;
+            }
+
+            if ($novoStatus === 'cancelado') {
+                foreach ($atual->itens as $item) {
+                    if ($item->produto_id) {
+                        Produto::whereKey($item->produto_id)->increment('quantidade', $item->quantidade);
+                    }
+                }
+            }
+
+            $atual->update(['status' => $novoStatus]);
+
+            return $atual;
+        });
+    }
+
+    public function botoesAvaliacao(): array
+    {
+        $linha = [];
+
+        foreach (range(1, 5) as $nota) {
+            $linha[] = ['text' => "{$nota} ⭐", 'callback_data' => "nota:{$this->id}:{$nota}"];
+        }
+
+        return [$linha];
     }
 
     public function mensagemDoStatus(): string

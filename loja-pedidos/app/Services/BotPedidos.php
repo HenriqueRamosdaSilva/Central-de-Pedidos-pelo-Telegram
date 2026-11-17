@@ -39,6 +39,7 @@ class BotPedidos
         if (str_starts_with($texto, '/')) {
             Cache::forget("cadastro:$chat");
             Cache::forget("checkout:$chat");
+            Cache::forget("avaliacao:$chat");
 
             match (true) {
                 str_starts_with($texto, '/start') => $this->boasVindas($mensagem['from'], $chat),
@@ -62,6 +63,12 @@ class BotPedidos
 
         if ($checkout && ! empty($checkout['etapa'])) {
             $this->continuarCheckout($mensagem['from'], $chat, $texto, $checkout);
+
+            return;
+        }
+
+        if ($pedidoId = Cache::pull("avaliacao:$chat")) {
+            $this->salvarComentario($chat, (int) $pedidoId, $texto);
 
             return;
         }
@@ -113,10 +120,14 @@ class BotPedidos
             $dados === 'tipo:entrega' => $this->escolherTipo($chat, 'entrega'),
             str_starts_with($dados, 'pag:') => $this->escolherPagamento($chat, substr($dados, 4)),
             $dados === 'obs:nenhuma' => $this->confirmar($clique['from'], $chat),
+            preg_match('/^cancelar:(\d+)$/', $dados, $m) === 1 => $this->pedirConfirmacaoDeCancelamento($chat, (int) $m[1]),
+            preg_match('/^cancelar_sim:(\d+)$/', $dados, $m) === 1 => $this->cancelarPedido($chat, (int) $m[1]),
+            $dados === 'cancelar_nao' => $this->telegram->enviar($chat, 'Tudo certo, o pedido continua em andamento.'),
+            preg_match('/^nota:(\d+):([1-5])$/', $dados, $m) === 1 => $this->registrarNota($chat, (int) $m[1], (int) $m[2]),
+            $dados === 'pular_comentario' => $this->pularComentario($chat),
             default => null,
         };
     }
-
 
     private function boasVindas(array $usuario, int $chat): void
     {
@@ -269,7 +280,6 @@ class BotPedidos
             [[['text' => 'Ver cardápio', 'callback_data' => 'cardapio']]]
         );
     }
-
 
     private function problemaNaCompra(int $chat): ?string
     {
@@ -471,7 +481,6 @@ class BotPedidos
         $semEstoque = null;
 
         $pedido = DB::transaction(function () use ($usuario, $chat, $estado, $itens, $taxa, &$semEstoque) {
-
             $estoque = Produto::whereIn('id', $itens->pluck('id'))->lockForUpdate()->get()->keyBy('id');
 
             foreach ($itens as $p) {
@@ -564,6 +573,92 @@ class BotPedidos
         return $texto;
     }
 
+
+    private function pedidoDoCliente(int $chat, int $id): ?Pedido
+    {
+        return Pedido::whereHas('cliente', fn ($q) => $q->where('telegram_id', $chat))->find($id);
+    }
+
+    private function pedirConfirmacaoDeCancelamento(int $chat, int $id): void
+    {
+        $pedido = $this->pedidoDoCliente($chat, $id);
+
+        if (! $pedido || ! in_array($pedido->status, ['novo', 'em_preparo'], true)) {
+            $this->avisarQueNaoPodeCancelar($chat);
+
+            return;
+        }
+
+        $this->telegram->enviar($chat, "Tem certeza que quer cancelar o pedido #{$id}?", [[
+            ['text' => 'Sim, cancelar', 'callback_data' => "cancelar_sim:$id"],
+            ['text' => 'Não', 'callback_data' => 'cancelar_nao'],
+        ]]);
+    }
+
+    private function cancelarPedido(int $chat, int $id): void
+    {
+        $pedido = $this->pedidoDoCliente($chat, $id);
+
+        $cancelado = $pedido ? Pedido::mudarStatus($id, 'cancelado', ['novo', 'em_preparo']) : null;
+
+        if (! $cancelado) {
+            $this->avisarQueNaoPodeCancelar($chat);
+
+            return;
+        }
+
+        $this->telegram->enviar($chat, "Pedido #{$id} cancelado. Quando quiser fazer outro, é só usar /cardapio.");
+    }
+
+    private function avisarQueNaoPodeCancelar(int $chat): void
+    {
+        $this->telegram->enviar($chat, 'Este pedido não pode mais ser cancelado: o cancelamento só é possível enquanto ele ainda não está pronto.');
+    }
+
+    private function registrarNota(int $chat, int $id, int $nota): void
+    {
+        $pedido = $this->pedidoDoCliente($chat, $id);
+
+        if (! $pedido || $pedido->status !== 'entregue') {
+            $this->telegram->enviar($chat, 'Só dá para avaliar pedidos já entregues.');
+
+            return;
+        }
+
+        if ($pedido->nota) {
+            $this->telegram->enviar($chat, 'Você já avaliou este pedido. Obrigado!');
+
+            return;
+        }
+
+        $pedido->update(['nota' => $nota]);
+        Cache::put("avaliacao:$chat", $id, now()->addHour());
+
+        $this->telegram->enviar(
+            $chat,
+            "Obrigado pela nota {$nota}/5! Quer deixar um comentário? Digite abaixo ou toque em Pular.",
+            [[['text' => 'Pular', 'callback_data' => 'pular_comentario']]]
+        );
+    }
+
+    private function salvarComentario(int $chat, int $id, string $texto): void
+    {
+        $pedido = $this->pedidoDoCliente($chat, $id);
+
+        if ($pedido && $pedido->nota) {
+            $pedido->update(['comentario_avaliacao' => mb_substr($texto, 0, 300)]);
+        }
+
+        $this->telegram->enviar($chat, 'Comentário salvo. Obrigado pela avaliação! 💚');
+    }
+
+    private function pularComentario(int $chat): void
+    {
+        Cache::forget("avaliacao:$chat");
+        $this->telegram->enviar($chat, 'Tudo certo, obrigado pela avaliação! 💚');
+    }
+
+
     private function meusPedidos(int $chat): void
     {
         $cliente = Cliente::where('telegram_id', $chat)->first();
@@ -587,6 +682,12 @@ class BotPedidos
                 . $this->reais($p->total) . ' · ' . $p->created_at->format('d/m H:i');
         });
 
-        $this->telegram->enviar($chat, "Seus últimos pedidos:\n\n" . $blocos->implode("\n\n"));
+        $botoes = $pedidos
+            ->filter(fn ($p) => in_array($p->status, ['novo', 'em_preparo'], true))
+            ->map(fn ($p) => [['text' => "❌ Cancelar pedido #{$p->id}", 'callback_data' => "cancelar:{$p->id}"]])
+            ->values()
+            ->all();
+
+        $this->telegram->enviar($chat, "Seus últimos pedidos:\n\n" . $blocos->implode("\n\n"), $botoes);
     }
 }

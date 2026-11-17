@@ -3,10 +3,8 @@
 namespace App\Http\Controllers;
 
 use App\Models\Pedido;
-use App\Models\Produto;
 use App\Services\TelegramService;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\DB;
 
 class PedidoController extends Controller
 {
@@ -33,31 +31,24 @@ class PedidoController extends Controller
             'status' => ['required', 'in:em_preparo,pronto,entregue,cancelado'],
         ]);
 
-        $atualizado = DB::transaction(function () use ($pedido, $dados) {
-            $atual = Pedido::with('itens')->lockForUpdate()->find($pedido->id);
-
-            if (in_array($atual->status, ['entregue', 'cancelado'], true)) {
-                return null;
-            }
-
-            if ($dados['status'] === 'cancelado') {
-                foreach ($atual->itens as $item) {
-                    if ($item->produto_id) {
-                        Produto::whereKey($item->produto_id)->increment('quantidade', $item->quantidade);
-                    }
-                }
-            }
-
-            $atual->update(['status' => $dados['status']]);
-
-            return $atual;
-        });
+        $atualizado = Pedido::mudarStatus($pedido->id, $dados['status']);
 
         if (! $atualizado) {
             return back()->with('success', 'Este pedido já foi finalizado e não pode mais ser alterado.');
         }
 
-        $telegram->enviar($atualizado->cliente->telegram_id, $atualizado->mensagemDoStatus());
+        $chat = $atualizado->cliente->telegram_id;
+        $mensagem = $atualizado->mensagemDoStatus();
+
+        if ($atualizado->status === 'entregue') {
+            $telegram->enviar(
+                $chat,
+                $mensagem . "\n\nComo foi o seu pedido? Toque numa nota de 1 a 5:",
+                $atualizado->botoesAvaliacao()
+            );
+        } else {
+            $telegram->enviar($chat, $mensagem);
+        }
 
         return back();
     }
