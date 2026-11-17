@@ -34,6 +34,7 @@
         <strong>Painel da loja</strong>
         <a href="{{ route('pedidos.index') }}">Pedidos</a>
         <a href="{{ route('produtos.index') }}">Produtos</a>
+        <a href="{{ route('configuracoes.edit') }}">Configurações</a>
     </header>
 
     <main>

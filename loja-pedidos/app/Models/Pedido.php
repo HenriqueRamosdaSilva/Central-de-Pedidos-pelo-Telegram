@@ -10,19 +10,33 @@ class Pedido extends Model
 {
     public const STATUS = ['novo', 'em_preparo', 'pronto', 'entregue', 'cancelado'];
 
-    // Para cada status: [próximo status, texto do botão]
+    public const ROTULOS = [
+        'novo' => 'recebido',
+        'em_preparo' => 'em preparo',
+        'pronto' => 'pronto',
+        'entregue' => 'entregue',
+        'cancelado' => 'cancelado',
+    ];
+
+    public const PAGAMENTOS = ['pix' => 'Pix', 'cartao' => 'Cartão', 'dinheiro' => 'Dinheiro'];
+
     public const PROXIMO = [
         'novo' => ['em_preparo', 'Aceitar pedido'],
         'em_preparo' => ['pronto', 'Marcar como pronto'],
         'pronto' => ['entregue', 'Marcar como entregue'],
     ];
 
-    protected $fillable = ['cliente_id', 'tipo', 'endereco', 'total', 'status'];
+    protected $fillable = [
+        'cliente_id', 'tipo', 'endereco', 'total', 'status',
+        'taxa_entrega', 'forma_pagamento', 'troco_para', 'observacao',
+    ];
 
     protected function casts(): array
     {
         return [
             'total' => 'decimal:2',
+            'taxa_entrega' => 'decimal:2',
+            'troco_para' => 'decimal:2',
         ];
     }
 
@@ -41,7 +55,16 @@ class Pedido extends Model
         return self::PROXIMO[$this->status] ?? null;
     }
 
-    // Mensagem enviada ao cliente no Telegram quando o status muda.
+    public function rotuloStatus(): string
+    {
+        return self::ROTULOS[$this->status] ?? $this->status;
+    }
+
+    public function rotuloPagamento(): string
+    {
+        return self::PAGAMENTOS[$this->forma_pagamento] ?? 'Não informado';
+    }
+
     public function mensagemDoStatus(): string
     {
         return match ($this->status) {
