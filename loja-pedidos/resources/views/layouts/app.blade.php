@@ -6,12 +6,13 @@
     <title>@yield('titulo', 'Loja')</title>
     <style>
         body { font-family: Arial, sans-serif; margin: 0; background: #eef2f5; color: #1b2733; }
-        header { display: flex; gap: 20px; align-items: center; padding: 14px 24px; background: #fff; border-bottom: 1px solid #ccd5df; }
+        header { display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: center; padding: 14px 24px; background: #fff; border-bottom: 1px solid #ccd5df; }
         header a { color: #0e6b73; text-decoration: none; font-weight: bold; }
+        header .usuario { margin-left: auto; color: #566676; }
         main { max-width: 1100px; margin: 24px auto; padding: 0 18px; }
         label { display: block; margin: 12px 0 4px; }
         input, select, textarea, button { padding: 8px; font: inherit; }
-        input[type=text], input[type=number], textarea { width: 100%; max-width: 420px; }
+        input[type=text], input[type=email], input[type=password], input[type=number], textarea { width: 100%; max-width: 420px; }
         button { cursor: pointer; }
         table { width: 100%; border-collapse: collapse; background: #fff; margin-top: 16px; }
         th, td { border: 1px solid #ccd5df; padding: 9px; text-align: left; }
@@ -28,12 +29,28 @@
         nav svg { width: 1.1rem; height: 1.1rem; }
         nav[role=navigation] { margin-top: 18px; }
     </style>
+    @stack('estilos')
 </head>
 <body>
     <header>
         <strong>Painel da loja</strong>
-        <a href="{{ route('pedidos.index') }}">Pedidos</a>
-        <a href="{{ route('produtos.index') }}">Produtos</a>
+
+        @auth
+            <a href="{{ route('pedidos.index') }}">Pedidos</a>
+
+            @if (auth()->user()->perfil === 'admin')
+                <a href="{{ route('relatorios.index') }}">Relatórios</a>
+                <a href="{{ route('produtos.index') }}">Produtos</a>
+                <a href="{{ route('configuracoes.edit') }}">Configurações</a>
+                <a href="{{ route('usuarios.index') }}">Usuários</a>
+            @endif
+
+            <span class="usuario">{{ auth()->user()->name }}</span>
+            <form action="{{ route('logout') }}" method="POST" style="display:inline">
+                @csrf
+                <button type="submit">Sair</button>
+            </form>
+        @endauth
     </header>
 
     <main>

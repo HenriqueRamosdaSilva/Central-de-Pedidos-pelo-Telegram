@@ -16,10 +16,34 @@
             @endforeach
         </ul>
 
+        @if ($pedido->observacao)
+            <p><strong>Observação:</strong> {{ $pedido->observacao }}</p>
+        @endif
+
+        <p>
+            Pagamento: {{ $pedido->rotuloPagamento() }}
+            @if ($pedido->troco_para)
+                (troco para R$ {{ number_format($pedido->troco_para, 2, ',', '.') }},
+                devolver R$ {{ number_format($pedido->troco_para - $pedido->total, 2, ',', '.') }})
+            @endif
+        </p>
+
         <p>
             <strong>R$ {{ number_format($pedido->total, 2, ',', '.') }}</strong>
+            @if ($pedido->taxa_entrega > 0)
+                (inclui entrega de R$ {{ number_format($pedido->taxa_entrega, 2, ',', '.') }})
+            @endif
             · Status: {{ str_replace('_', ' ', $pedido->status) }}
         </p>
+
+        @if ($pedido->nota)
+            <p>
+                Avaliação: {{ str_repeat('★', $pedido->nota) }}{{ str_repeat('☆', 5 - $pedido->nota) }}
+                @if ($pedido->comentario_avaliacao)
+                    — {{ $pedido->comentario_avaliacao }}
+                @endif
+            </p>
+        @endif
 
         @if ($proximo = $pedido->proximoStatus())
             <form action="{{ route('pedidos.status', $pedido) }}" method="POST">
