@@ -40,6 +40,7 @@
 
             @if (auth()->user()->perfil === 'admin')
                 <a href="{{ route('relatorios.index') }}">Relatórios</a>
+                <a href="{{ route('avaliacoes.index') }}">Avaliações</a>
                 <a href="{{ route('produtos.index') }}">Produtos</a>
                 <a href="{{ route('configuracoes.edit') }}">Configurações</a>
                 <a href="{{ route('usuarios.index') }}">Usuários</a>

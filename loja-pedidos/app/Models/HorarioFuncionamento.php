@@ -39,6 +39,15 @@ class HorarioFuncionamento extends Model
 
     public static function abertoAgora(): bool
     {
+        if (Configuracao::atual()->loja_pausada) {
+            return false;
+        }
+
+        return self::dentroDoHorario();
+    }
+
+    public static function dentroDoHorario(): bool
+    {
         $agora = now();
         $hoje = self::garantir()->get($agora->dayOfWeek);
 
@@ -81,6 +90,7 @@ class HorarioFuncionamento extends Model
 
         return null;
     }
+
     public static function resumo(): string
     {
         $horarios = self::garantir();

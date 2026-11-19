@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Models\ChatVendedor;
 use App\Models\Cliente;
 use App\Models\Configuracao;
 use App\Models\HorarioFuncionamento;
@@ -10,13 +11,17 @@ use App\Models\Produto;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\RateLimiter;
 
 class BotPedidos
 {
-    public function __construct(private TelegramService $telegram)
-    {
+    public function __construct(
+        private TelegramService $telegram,
+        private NotificacaoPedidos $avisos,
+    ) {
     }
 
+    // Recebe uma atualização do Telegram (mensagem de texto ou clique em botão).
     public function processar(array $update): void
     {
         if (isset($update['callback_query'])) {
@@ -36,6 +41,25 @@ class BotPedidos
         $chat = $mensagem['chat']['id'];
         $texto = trim($mensagem['text']);
 
+        // Comandos do vendedor (funcionam também em grupos).
+        if (preg_match('/^\/vendedor(?:@\w+)?(?:\s+(\S+))?\s*$/i', $texto, $m)) {
+            $this->vincularVendedor($mensagem, $m[1] ?? null);
+
+            return;
+        }
+
+        if (preg_match('/^\/sairvendedor(?:@\w+)?\s*$/i', $texto)) {
+            $this->desvincularVendedor($chat);
+
+            return;
+        }
+
+        // Em grupos o bot só atende os comandos acima.
+        if (($mensagem['chat']['type'] ?? 'private') !== 'private') {
+            return;
+        }
+
+        // Comandos sempre cancelam o que estava sendo preenchido (cadastro ou finalização do pedido).
         if (str_starts_with($texto, '/')) {
             Cache::forget("cadastro:$chat");
             Cache::forget("checkout:$chat");
@@ -47,7 +71,8 @@ class BotPedidos
                 str_starts_with($texto, '/carrinho') => $this->mostrarCarrinho($chat),
                 str_starts_with($texto, '/cadastro') => $this->iniciarCadastro($chat),
                 str_starts_with($texto, '/meuspedidos') => $this->meusPedidos($chat),
-                default => $this->telegram->enviar($chat, 'Comando não reconhecido. Use /cardapio, /carrinho, /meuspedidos ou /cadastro.'),
+                str_starts_with($texto, '/repetir') => $this->repetirUltimoPedido($chat),
+                default => $this->telegram->enviar($chat, 'Comando não reconhecido. Use /cardapio, /carrinho, /meuspedidos, /repetir ou /cadastro.'),
             };
 
             return;
@@ -81,6 +106,7 @@ class BotPedidos
         $chat = $clique['message']['chat']['id'];
         $dados = $clique['data'] ?? '';
 
+        // Loja fechada: não deixa adicionar itens (o cardápio pode ter sido aberto antes de fechar).
         if (str_starts_with($dados, 'add:') && ! HorarioFuncionamento::abertoAgora()) {
             $this->telegram->responderCallback($clique['id'], 'A loja está fechada no momento');
             $this->avisarLojaFechada($chat);
@@ -125,9 +151,13 @@ class BotPedidos
             $dados === 'cancelar_nao' => $this->telegram->enviar($chat, 'Tudo certo, o pedido continua em andamento.'),
             preg_match('/^nota:(\d+):([1-5])$/', $dados, $m) === 1 => $this->registrarNota($chat, (int) $m[1], (int) $m[2]),
             $dados === 'pular_comentario' => $this->pularComentario($chat),
+            $dados === 'repetir' => $this->repetirUltimoPedido($chat),
+            str_starts_with($dados, 'v:') => $this->acaoDoVendedor($clique, $dados),
             default => null,
         };
     }
+
+    // ---------- Boas-vindas, cardápio e carrinho ----------
 
     private function boasVindas(array $usuario, int $chat): void
     {
@@ -172,6 +202,10 @@ class BotPedidos
 
     private function textoLojaFechada(): string
     {
+        if (Configuracao::atual()->loja_pausada) {
+            return '⏸ A loja está temporariamente fechada. Volte a nos chamar em instantes!';
+        }
+
         $proxima = HorarioFuncionamento::proximaAbertura();
 
         return '⏰ A loja está fechada no momento.' . ($proxima ? " Abrimos {$proxima}." : '')
@@ -239,7 +273,6 @@ class BotPedidos
         Cache::forget("carrinho:$chat");
         $this->mostrarCardapio($chat);
     }
-
 
     private function iniciarCadastro(int $chat): void
     {
@@ -344,6 +377,7 @@ class BotPedidos
         $estado['endereco'] = null;
 
         if ($tipo === 'entrega') {
+            // Cliente cadastrado: usa o endereço salvo. Sem cadastro: pergunta.
             $endereco = Cliente::where('telegram_id', $chat)->value('endereco');
 
             if (! $endereco) {
@@ -479,8 +513,11 @@ class BotPedidos
         $itens = $this->itensDoCarrinho($chat);
         $taxa = $this->taxaDe($estado['tipo']);
         $semEstoque = null;
+        $minimoEstoque = (int) Configuracao::atual()->estoque_minimo;
+        $estoqueBaixo = [];
 
-        $pedido = DB::transaction(function () use ($usuario, $chat, $estado, $itens, $taxa, &$semEstoque) {
+        $pedido = DB::transaction(function () use ($usuario, $chat, $estado, $itens, $taxa, $minimoEstoque, &$semEstoque, &$estoqueBaixo) {
+            // Trava as linhas dos produtos: dois clientes não conseguem comprar o último item ao mesmo tempo.
             $estoque = Produto::whereIn('id', $itens->pluck('id'))->lockForUpdate()->get()->keyBy('id');
 
             foreach ($itens as $p) {
@@ -516,7 +553,14 @@ class BotPedidos
                     'quantidade' => $p->qtd,
                 ]);
 
-                $estoque->get($p->id)->decrement('quantidade', $p->qtd);
+                $produtoNoEstoque = $estoque->get($p->id);
+                $antes = $produtoNoEstoque->quantidade;
+                $produtoNoEstoque->decrement('quantidade', $p->qtd);
+
+                // Guarda os produtos que acabaram de ficar com estoque baixo (para avisar o vendedor).
+                if ($antes > $minimoEstoque && $antes - $p->qtd <= $minimoEstoque) {
+                    $estoqueBaixo[] = ['nome' => $p->nome, 'restam' => $antes - $p->qtd];
+                }
             }
 
             return $pedido;
@@ -537,6 +581,13 @@ class BotPedidos
         Cache::forget("checkout:$chat");
 
         $this->telegram->enviar($chat, $this->resumoDoPedido($pedido, $itens, $taxa));
+
+        // Pix copia e cola (se o vendedor cadastrou a chave nas configurações).
+        $this->enviarPix($chat, $pedido);
+
+        // Avisa o vendedor no Telegram.
+        $this->avisos->novoPedido($pedido);
+        $this->avisos->estoqueBaixo($estoqueBaixo);
     }
 
     private function resumoDoPedido(Pedido $pedido, Collection $itens, float $taxa): string
@@ -573,7 +624,177 @@ class BotPedidos
         return $texto;
     }
 
+    private function enviarPix(int $chat, Pedido $pedido): void
+    {
+        if ($pedido->forma_pagamento !== 'pix') {
+            return;
+        }
 
+        $config = Configuracao::atual();
+        $codigo = PixService::copiaECola($config->chave_pix, $config->pix_nome, $config->pix_cidade, (float) $pedido->total);
+
+        if (! $codigo) {
+            return;
+        }
+
+        $quando = $pedido->tipo === 'entrega' ? 'entrega' : 'retirada';
+
+        $this->telegram->enviar(
+            $chat,
+            '💠 Pix copia e cola — ' . $this->reais($pedido->total)
+                . "\nToque no código para copiar e cole no app do seu banco. Se preferir, pague na {$quando}.\n\n"
+                . '<code>' . e($codigo) . '</code>',
+            [],
+            true
+        );
+    }
+
+    private function repetirUltimoPedido(int $chat): void
+    {
+        if (! HorarioFuncionamento::abertoAgora()) {
+            $this->avisarLojaFechada($chat);
+
+            return;
+        }
+
+        $cliente = Cliente::where('telegram_id', $chat)->first();
+        $ultimo = $cliente
+            ? $cliente->pedidos()->where('status', '!=', 'cancelado')->with('itens')->orderByDesc('id')->first()
+            : null;
+
+        if (! $ultimo) {
+            $this->telegram->enviar($chat, 'Você ainda não tem um pedido anterior para repetir. Use /cardapio para escolher seus produtos.');
+
+            return;
+        }
+
+        $carrinho = [];
+        $indisponiveis = [];
+
+        foreach ($ultimo->itens as $item) {
+            $produto = $item->produto_id ? Produto::where('ativo', true)->find($item->produto_id) : null;
+            $disponivel = $produto ? min($item->quantidade, $produto->quantidade) : 0;
+
+            if ($disponivel > 0) {
+                $carrinho[$produto->id] = ($carrinho[$produto->id] ?? 0) + $disponivel;
+            }
+
+            if ($disponivel < $item->quantidade) {
+                $indisponiveis[] = $item->nome;
+            }
+        }
+
+        if (! $carrinho) {
+            $this->telegram->enviar($chat, 'Os itens do seu último pedido não estão disponíveis no momento. Use /cardapio para ver o que temos.');
+
+            return;
+        }
+
+        $substituiu = Cache::has("carrinho:$chat");
+        Cache::put("carrinho:$chat", $carrinho, now()->addDay());
+
+        if ($indisponiveis) {
+            $this->telegram->enviar($chat, 'Estes itens estão sem estoque suficiente e ficaram de fora (ou com menos unidades): ' . implode(', ', $indisponiveis) . '.');
+        }
+
+        $this->telegram->enviar($chat, "Montei o carrinho com os itens do pedido #{$ultimo->id}." . ($substituiu ? ' O carrinho que você tinha foi substituído.' : ''));
+        $this->mostrarCarrinho($chat);
+    }
+
+    private function vincularVendedor(array $mensagem, ?string $codigo): void
+    {
+        $chat = $mensagem['chat']['id'];
+
+        if (! $codigo) {
+            $this->telegram->enviar($chat, 'Para receber os avisos de pedidos, envie /vendedor seguido do código que aparece em Configurações no painel. Exemplo: /vendedor ABCD2345');
+
+            return;
+        }
+
+        $chave = "vendedor:$chat";
+
+        if (RateLimiter::tooManyAttempts($chave, 5)) {
+            $this->telegram->enviar($chat, 'Muitas tentativas. Aguarde alguns minutos e tente de novo.');
+
+            return;
+        }
+
+        if (! hash_equals(strtoupper((string) Configuracao::atual()->codigo_vendedor), strtoupper($codigo))) {
+            RateLimiter::hit($chave, 600);
+            $this->telegram->enviar($chat, 'Código inválido.');
+
+            return;
+        }
+
+        RateLimiter::clear($chave);
+
+        $usuario = $mensagem['from'] ?? [];
+        $nome = $mensagem['chat']['title'] ?? trim(($usuario['first_name'] ?? '') . ' ' . ($usuario['last_name'] ?? ''));
+
+        ChatVendedor::updateOrCreate(
+            ['chat_id' => $chat],
+            ['nome' => $nome ?: "Chat {$chat}", 'tipo' => $mensagem['chat']['type'] ?? 'private']
+        );
+
+        $this->telegram->enviar($chat, 'Pronto! Este chat vai receber os avisos de pedidos novos, cancelamentos e estoque baixo. Pelos botões da mensagem você aceita, conclui ou cancela pedidos. Use /sairvendedor para parar de receber.');
+    }
+
+    private function desvincularVendedor(int $chat): void
+    {
+        $removido = ChatVendedor::where('chat_id', $chat)->delete();
+
+        $this->telegram->enviar($chat, $removido
+            ? 'Tudo certo, este chat não recebe mais os avisos do vendedor.'
+            : 'Este chat não estava recebendo avisos de vendedor.');
+    }
+
+    // Botões da mensagem de pedido enviada ao vendedor (callback "v:ação:id").
+    private function acaoDoVendedor(array $clique, string $dados): void
+    {
+        $chat = $clique['message']['chat']['id'];
+        $mensagemId = $clique['message']['message_id'];
+
+        if (! ChatVendedor::where('chat_id', $chat)->exists()) {
+            $this->telegram->enviar($chat, 'Este chat não está autorizado a atualizar pedidos.');
+
+            return;
+        }
+
+        if (! preg_match('/^v:(em_preparo|pronto|entregue|cancelado|pcancelar|voltar):(\d+)$/', $dados, $m)) {
+            return;
+        }
+
+        [, $acao, $id] = $m;
+        $pedido = Pedido::with(['cliente', 'itens'])->find((int) $id);
+
+        if (! $pedido) {
+            $this->telegram->enviar($chat, 'Pedido não encontrado.');
+
+            return;
+        }
+
+        // Pede confirmação antes de cancelar.
+        if ($acao === 'pcancelar') {
+            $this->telegram->editar($chat, $mensagemId, $this->avisos->textoParaVendedor($pedido), $this->avisos->botoesDeConfirmarCancelamento($pedido));
+
+            return;
+        }
+
+        if ($acao !== 'voltar') {
+            $atualizado = Pedido::mudarStatus($pedido->id, $acao, Pedido::ORIGENS[$acao]);
+
+            if ($atualizado) {
+                $pedido = $atualizado->load(['cliente', 'itens']);
+                $this->avisos->avisarCliente($pedido);
+            } else {
+                // Alguém já mexeu no pedido (painel ou outro chat): mostra a situação atual.
+                $pedido = $pedido->fresh(['cliente', 'itens']);
+                $this->telegram->enviar($chat, "O pedido #{$pedido->id} já tinha sido atualizado (agora: {$pedido->rotuloStatus()}).");
+            }
+        }
+
+        $this->telegram->editar($chat, $mensagemId, $this->avisos->textoParaVendedor($pedido), $this->avisos->botoesParaVendedor($pedido));
+    }
     private function pedidoDoCliente(int $chat, int $id): ?Pedido
     {
         return Pedido::whereHas('cliente', fn ($q) => $q->where('telegram_id', $chat))->find($id);
@@ -599,6 +820,7 @@ class BotPedidos
     {
         $pedido = $this->pedidoDoCliente($chat, $id);
 
+        // Só cancela enquanto o pedido não estiver pronto; o estoque volta junto.
         $cancelado = $pedido ? Pedido::mudarStatus($id, 'cancelado', ['novo', 'em_preparo']) : null;
 
         if (! $cancelado) {
@@ -608,6 +830,7 @@ class BotPedidos
         }
 
         $this->telegram->enviar($chat, "Pedido #{$id} cancelado. Quando quiser fazer outro, é só usar /cardapio.");
+        $this->avisos->clienteCancelou($cancelado);
     }
 
     private function avisarQueNaoPodeCancelar(int $chat): void
@@ -658,7 +881,6 @@ class BotPedidos
         $this->telegram->enviar($chat, 'Tudo certo, obrigado pela avaliação! 💚');
     }
 
-
     private function meusPedidos(int $chat): void
     {
         $cliente = Cliente::where('telegram_id', $chat)->first();
@@ -682,11 +904,14 @@ class BotPedidos
                 . $this->reais($p->total) . ' · ' . $p->created_at->format('d/m H:i');
         });
 
+        // Só dá para cancelar enquanto o pedido ainda não está pronto.
         $botoes = $pedidos
             ->filter(fn ($p) => in_array($p->status, ['novo', 'em_preparo'], true))
             ->map(fn ($p) => [['text' => "❌ Cancelar pedido #{$p->id}", 'callback_data' => "cancelar:{$p->id}"]])
             ->values()
             ->all();
+
+        $botoes[] = [['text' => '🔁 Repetir último pedido', 'callback_data' => 'repetir']];
 
         $this->telegram->enviar($chat, "Seus últimos pedidos:\n\n" . $blocos->implode("\n\n"), $botoes);
     }

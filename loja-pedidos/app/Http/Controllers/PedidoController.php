@@ -2,8 +2,11 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\Configuracao;
+use App\Models\HorarioFuncionamento;
 use App\Models\Pedido;
-use App\Services\TelegramService;
+use App\Models\Produto;
+use App\Services\NotificacaoPedidos;
 use Illuminate\Http\Request;
 
 class PedidoController extends Controller
@@ -22,33 +25,26 @@ class PedidoController extends Controller
 
         $pedidos = $consulta->orderByDesc('id')->paginate(10)->withQueryString();
 
-        return view('pedidos.index', compact('pedidos', 'status'));
+        $config = Configuracao::atual();
+        $dentroDoHorario = HorarioFuncionamento::dentroDoHorario();
+        $estoqueBaixo = Produto::where('ativo', true)->where('quantidade', '<=', $config->estoque_minimo)->count();
+
+        return view('pedidos.index', compact('pedidos', 'status', 'config', 'dentroDoHorario', 'estoqueBaixo'));
     }
 
-    public function atualizarStatus(Request $request, Pedido $pedido, TelegramService $telegram)
+    public function atualizarStatus(Request $request, Pedido $pedido, NotificacaoPedidos $avisos)
     {
         $dados = $request->validate([
             'status' => ['required', 'in:em_preparo,pronto,entregue,cancelado'],
         ]);
 
-        $atualizado = Pedido::mudarStatus($pedido->id, $dados['status']);
+        $atualizado = Pedido::mudarStatus($pedido->id, $dados['status'], Pedido::ORIGENS[$dados['status']]);
 
         if (! $atualizado) {
-            return back()->with('success', 'Este pedido já foi finalizado e não pode mais ser alterado.');
+            return back()->with('success', 'Este pedido já foi atualizado e não pode mais mudar para esse status.');
         }
 
-        $chat = $atualizado->cliente->telegram_id;
-        $mensagem = $atualizado->mensagemDoStatus();
-
-        if ($atualizado->status === 'entregue') {
-            $telegram->enviar(
-                $chat,
-                $mensagem . "\n\nComo foi o seu pedido? Toque numa nota de 1 a 5:",
-                $atualizado->botoesAvaliacao()
-            );
-        } else {
-            $telegram->enviar($chat, $mensagem);
-        }
+        $avisos->avisarCliente($atualizado);
 
         return back();
     }

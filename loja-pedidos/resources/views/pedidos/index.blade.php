@@ -16,6 +16,7 @@
     </form>
 
     <div id="lista">
+        @include('pedidos._estado_loja')
         @include('pedidos._lista')
     </div>
 @endsection
@@ -31,4 +32,15 @@
             if (nova) document.getElementById('lista').innerHTML = nova.innerHTML;
         }, 8000);
     </script>
+@endpush
+
+@push('estilos')
+    <style>
+        .estado-loja { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; justify-content: space-between; padding: 10px 14px; margin: 12px 0; border-radius: 6px; }
+        .estado-loja.aberta { background: #d9f2e4; }
+        .estado-loja.fora { background: #e3eaf0; }
+        .estado-loja.pausada { background: #fde4e1; }
+        .estado-loja form { margin: 0; }
+        .alerta-estoque { background: #fff3cd; padding: 10px 14px; border-radius: 6px; }
+    </style>
 @endpush

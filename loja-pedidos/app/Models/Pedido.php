@@ -27,6 +27,13 @@ class Pedido extends Model
         'pronto' => ['entregue', 'Marcar como entregue'],
     ];
 
+    public const ORIGENS = [
+        'em_preparo' => ['novo'],
+        'pronto' => ['em_preparo'],
+        'entregue' => ['pronto'],
+        'cancelado' => ['novo', 'em_preparo', 'pronto'],
+    ];
+
     protected $fillable = [
         'cliente_id', 'tipo', 'endereco', 'total', 'status',
         'taxa_entrega', 'forma_pagamento', 'troco_para', 'observacao',
