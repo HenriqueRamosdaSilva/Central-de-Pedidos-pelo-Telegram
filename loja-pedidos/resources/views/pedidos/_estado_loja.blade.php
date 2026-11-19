@@ -1,7 +1,9 @@
+
 <div class="estado-loja {{ $config->loja_pausada ? 'pausada' : ($dentroDoHorario ? 'aberta' : 'fora') }}">
+
     <span>
         @if ($config->loja_pausada)
-            ⏸ Loja pausada: o bot não está aceitando pedidos.
+            ⏸️ Loja pausada: o bot não está aceitando pedidos.
         @elseif ($dentroDoHorario)
             🟢 Loja aberta: o bot está aceitando pedidos.
         @else
@@ -9,20 +11,37 @@
         @endif
     </span>
 
-    <form action="{{ route('loja.pausa') }}" method="POST"
-          @unless ($config->loja_pausada)
-              onsubmit="return confirm('Pausar a loja? O bot vai parar de aceitar pedidos agora.')"
-          @endunless>
+    <form
+        action="{{ route('loja.pausa') }}"
+        method="POST"
+        @unless ($config->loja_pausada)
+            onsubmit="return confirm('Pausar a loja? O bot vai parar de aceitar pedidos agora.')"
+        @endunless
+    >
         @csrf
-        <button type="submit">{{ $config->loja_pausada ? 'Reabrir loja' : 'Pausar loja' }}</button>
+
+        <button type="submit">
+            {{ $config->loja_pausada ? 'Reabrir loja' : 'Pausar loja' }}
+        </button>
     </form>
+
 </div>
 
 @if ($estoqueBaixo > 0)
-    <p class="alerta-estoque">
-        ⚠️ {{ $estoqueBaixo }} produto(s) com estoque baixo ou esgotado.
+
+    <div class="alerta-estoque">
+        <span>⚠️</span>
+
+        <span>
+            <strong>{{ $estoqueBaixo }} produto(s)</strong>
+            com estoque baixo ou esgotado.
+        </span>
+
         @if (auth()->user()->perfil === 'admin')
-            <a href="{{ route('produtos.index', ['baixo' => 1]) }}">Ver produtos</a>
+            <a href="{{ route('produtos.index', ['baixo' => 1]) }}">
+                Ver produtos →
+            </a>
         @endif
-    </p>
+    </div>
+
 @endif
