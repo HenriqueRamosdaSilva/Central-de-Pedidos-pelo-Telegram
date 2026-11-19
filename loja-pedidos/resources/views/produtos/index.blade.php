@@ -2,6 +2,14 @@
 
 @section('titulo', 'Produtos')
 
+@push('estilos')
+    <style>
+        tr.baixo td { background: #fff3cd; }
+        tr.esgotado td { background: #fde4e1; }
+        .selo { margin-left: 6px; font-size: .8rem; }
+    </style>
+@endpush
+
 @section('conteudo')
     <h1>Produtos</h1>
 
@@ -10,6 +18,12 @@
     <form action="{{ route('produtos.index') }}" method="GET">
         <label for="busca">Pesquisar pelo nome</label>
         <input type="text" id="busca" name="busca" value="{{ $termo }}" placeholder="Ex.: burger">
+
+        <label>
+            <input type="checkbox" name="baixo" value="1" @checked($apenasBaixo)>
+            Só estoque baixo (até {{ $minimo }} unidades) ou esgotado
+        </label>
+
         <button type="submit">Pesquisar</button>
         <a href="{{ route('produtos.index') }}">Limpar</a>
     </form>
@@ -27,10 +41,17 @@
             </thead>
             <tbody>
                 @foreach ($produtos as $produto)
-                    <tr>
+                    <tr class="{{ $produto->ativo && $produto->quantidade === 0 ? 'esgotado' : ($produto->ativo && $produto->quantidade <= $minimo ? 'baixo' : '') }}">
                         <td>{{ $produto->nome }}</td>
                         <td>R$ {{ number_format($produto->preco, 2, ',', '.') }}</td>
-                        <td>{{ $produto->quantidade }}</td>
+                        <td>
+                            {{ $produto->quantidade }}
+                            @if ($produto->ativo && $produto->quantidade === 0)
+                                <strong class="selo">Esgotado</strong>
+                            @elseif ($produto->ativo && $produto->quantidade <= $minimo)
+                                <strong class="selo">Estoque baixo</strong>
+                            @endif
+                        </td>
                         <td>{{ $produto->ativo ? 'Ativo' : 'Inativo' }}</td>
                         <td>
                             <a href="{{ route('produtos.edit', $produto) }}">Editar</a>

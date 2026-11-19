@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\Configuracao;
 use App\Models\Produto;
 use Illuminate\Http\Request;
 use Illuminate\Validation\Rule;
@@ -11,14 +12,17 @@ class ProdutoController extends Controller
     public function index(Request $request)
     {
         $termo = trim((string) $request->input('busca', ''));
+        $minimo = (int) Configuracao::atual()->estoque_minimo;
+        $apenasBaixo = $request->boolean('baixo');
 
         $produtos = Produto::query()
             ->when($termo !== '', fn ($consulta) => $consulta->where('nome', 'ilike', '%' . $termo . '%'))
+            ->when($apenasBaixo, fn ($consulta) => $consulta->where('ativo', true)->where('quantidade', '<=', $minimo))
             ->orderBy('nome')
             ->paginate(10)
             ->withQueryString();
 
-        return view('produtos.index', compact('produtos', 'termo'));
+        return view('produtos.index', compact('produtos', 'termo', 'minimo', 'apenasBaixo'));
     }
 
     public function create()

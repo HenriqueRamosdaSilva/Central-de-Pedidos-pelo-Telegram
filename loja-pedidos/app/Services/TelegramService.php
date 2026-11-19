@@ -13,13 +13,19 @@ class TelegramService
         $url = 'https://api.telegram.org/bot' . config('telegram.token') . '/' . $metodo;
 
         return Http::timeout($timeout)
-            ->when(! config('telegram.verificar_ssl'), fn($http) => $http->withoutVerifying())
+            ->when(! config('telegram.verificar_ssl'), fn ($http) => $http->withoutVerifying())
             ->post($url, $dados);
     }
 
-    public function enviar(int $chat, string $texto, array $botoes = []): void
+    // $botoes: linhas de botões inline, ex.: [[['text' => 'Ok', 'callback_data' => 'ok']]]
+    // $html: true para usar <code>, <b> etc. no texto (quem chama precisa escapar o conteúdo).
+    public function enviar(int $chat, string $texto, array $botoes = [], bool $html = false): void
     {
         $dados = ['chat_id' => $chat, 'text' => $texto];
+
+        if ($html) {
+            $dados['parse_mode'] = 'HTML';
+        }
 
         if ($botoes) {
             $dados['reply_markup'] = ['inline_keyboard' => $botoes];
@@ -27,6 +33,21 @@ class TelegramService
 
         try {
             $this->api('sendMessage', $dados);
+        } catch (ConnectionException $e) {
+            report($e);
+        }
+    }
+
+    // Troca o texto e os botões de uma mensagem que o bot já enviou.
+    public function editar(int $chat, int $mensagemId, string $texto, array $botoes = []): void
+    {
+        try {
+            $this->api('editMessageText', [
+                'chat_id' => $chat,
+                'message_id' => $mensagemId,
+                'text' => $texto,
+                'reply_markup' => ['inline_keyboard' => $botoes],
+            ]);
         } catch (ConnectionException $e) {
             report($e);
         }
@@ -44,6 +65,7 @@ class TelegramService
         }
     }
 
+    // Long polling: a requisição fica aberta até chegar mensagem nova (ou 25 s).
     public function buscarAtualizacoes(int $offset): array
     {
         try {
